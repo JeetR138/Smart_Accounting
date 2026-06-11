@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=mysql+pymysql://smart_user:smart_pass@db:3306/smart_accounting
+      - ANTHROPIC_API_KEY=your-anthropic-api-key
+      - ZOHO_CLIENT_ID=your-zoho-client-id
+      - ZOHO_CLIENT_SECRET=your-zoho-client-secret
+      - ZOHO_REDIRECT_URI=http://localhost:8000/api/v1/companies/connect-zoho/callback
+      - ZOHO_ACCOUNTS_URL=https://accounts.zoho.com
+      - ZOHO_BOOKS_URL=https://www.zohoapis.com/books
+      - SESSION_SECRET_KEY=some-highly-secure-random-token-string
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_DATABASE: smart_accounting
+      MYSQL_USER: smart_user
+      MYSQL_PASSWORD: smart_pass
+      MYSQL_ROOT_PASSWORD: root_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "smart_user", "-psmart_pass"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  mysql_data:
