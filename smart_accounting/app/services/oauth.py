@@ -5,6 +5,7 @@ import httpx
 from sqlalchemy.orm import Session
 from smart_accounting.app.config import settings
 from smart_accounting.app.models import Company, ZohoToken
+from smart_accounting.app.services.security import encrypt_value, decrypt_value
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ def generate_authorization_url(company_id: int) -> str:
 
 def exchange_code_for_tokens(db: Session, company_id: int, code: str) -> Dict[str, Any]:
     """
-    Exchanges OAuth auth code for access and refresh tokens and stores them in the DB.
+    Exchanges OAuth auth code for access and refresh tokens, encrypts them, and stores them in the DB.
     """
     # Quick sanity check for the company
     company = db.query(Company).filter(Company.id == company_id).first()
@@ -74,19 +75,21 @@ def exchange_code_for_tokens(db: Session, company_id: int, code: str) -> Dict[st
                 raise
             raise ZohoOAuthError(f"Network error during Zoho token swap: {e}")
             
-    # Save token in DB
+    # Encrypt tokens before saving in DB
+    encrypted_access_token = encrypt_value(access_token)
+    encrypted_refresh_token = encrypt_value(refresh_token)
     expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
     
     token_entry = db.query(ZohoToken).filter(ZohoToken.company_id == company_id).first()
     if token_entry:
-        token_entry.access_token = access_token
-        token_entry.refresh_token = refresh_token
+        token_entry.access_token = encrypted_access_token
+        token_entry.refresh_token = encrypted_refresh_token
         token_entry.expires_at = expires_at
     else:
         token_entry = ZohoToken(
             company_id=company_id,
-            access_token=access_token,
-            refresh_token=refresh_token,
+            access_token=encrypted_access_token,
+            refresh_token=encrypted_refresh_token,
             expires_at=expires_at
         )
         db.add(token_entry)
@@ -96,7 +99,7 @@ def exchange_code_for_tokens(db: Session, company_id: int, code: str) -> Dict[st
     db.refresh(token_entry)
     
     return {
-        "access_token": token_entry.access_token,
+        "access_token": access_token,  # Return raw token for caller preview
         "expires_at": token_entry.expires_at,
         "zoho_connected": True
     }
@@ -105,9 +108,12 @@ def refresh_access_token(db: Session, token_entry: ZohoToken) -> str:
     """
     Requests a new access token from Zoho using the stored refresh token.
     """
+    # Decrypt refresh token to make the API call
+    decrypted_refresh_token = decrypt_value(token_entry.refresh_token)
+    
     url = f"{settings.ZOHO_ACCOUNTS_URL}/oauth/v2/token"
     data = {
-        "refresh_token": token_entry.refresh_token,
+        "refresh_token": decrypted_refresh_token,
         "client_id": settings.ZOHO_CLIENT_ID,
         "client_secret": settings.ZOHO_CLIENT_SECRET,
         "grant_type": "refresh_token"
@@ -117,7 +123,7 @@ def refresh_access_token(db: Session, token_entry: ZohoToken) -> str:
     import sys
     import os
     is_testing = "pytest" in sys.modules or os.getenv("TESTING") == "True"
-    if not settings.ZOHO_CLIENT_ID or settings.ZOHO_CLIENT_ID == "your-zoho-client-id" or "mock" in settings.ZOHO_CLIENT_ID or "mock" in token_entry.refresh_token or is_testing:
+    if not settings.ZOHO_CLIENT_ID or settings.ZOHO_CLIENT_ID == "your-zoho-client-id" or "mock" in settings.ZOHO_CLIENT_ID or "mock" in decrypted_refresh_token or is_testing:
         logger.info("Using mock Zoho token refresh")
         access_token = f"mock_refreshed_token_{int(datetime.utcnow().timestamp())}"
         expires_in = 3600
@@ -137,13 +143,13 @@ def refresh_access_token(db: Session, token_entry: ZohoToken) -> str:
                 raise
             raise ZohoOAuthError(f"Network error during Zoho token refresh: {e}")
             
-    # Update access token and expiration time
-    token_entry.access_token = access_token
+    # Encrypt and update access token and expiration time
+    token_entry.access_token = encrypt_value(access_token)
     token_entry.expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
     db.commit()
     db.refresh(token_entry)
     
-    return token_entry.access_token
+    return access_token  # Return decrypted/raw token
 
 def get_valid_access_token(db: Session, company_id: int) -> str:
     """
@@ -160,4 +166,5 @@ def get_valid_access_token(db: Session, company_id: int) -> str:
         logger.info(f"Access token for company {company_id} is expired/expiring soon. Refreshing...")
         return refresh_access_token(db, token_entry)
         
-    return token_entry.access_token
+    # Decrypt and return the active token
+    return decrypt_value(token_entry.access_token)

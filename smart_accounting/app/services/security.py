@@ -1,5 +1,58 @@
 import os
+import base64
+import hashlib
+import bcrypt
+from datetime import timedelta
+from typing import Optional
 from fastapi import HTTPException, UploadFile
+from cryptography.fernet import Fernet
+from smart_accounting.app.config import settings
+
+def hash_password(password: str) -> str:
+    """Hashes a plain text password using bcrypt."""
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verifies a plain text password against a hashed bcrypt password."""
+    try:
+        return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+    except Exception:
+        return False
+
+def get_fernet() -> Fernet:
+    """Derives a secure base64 Fernet key using SHA-256 fallback if the configured key is not standard."""
+    key_str = settings.ENCRYPTION_SECRET_KEY
+    try:
+        # Check if the key is already a valid urlsafe base64 string and 32 bytes long decoded
+        key_bytes = base64.urlsafe_b64decode(key_str.encode())
+        if len(key_bytes) == 32:
+            return Fernet(key_str.encode())
+    except Exception:
+        pass
+    
+    # Fallback key derivation from config secret key
+    fallback_seed = key_str or settings.SESSION_SECRET_KEY or "fallback-secure-seed-phrase"
+    derived_bytes = hashlib.sha256(fallback_seed.encode()).digest()
+    derived_key = base64.urlsafe_b64encode(derived_bytes)
+    return Fernet(derived_key)
+
+def encrypt_value(value: str) -> str:
+    """Encrypts a string using Fernet AES-256."""
+    if not value:
+        return ""
+    fernet = get_fernet()
+    return fernet.encrypt(value.encode('utf-8')).decode('utf-8')
+
+def decrypt_value(encrypted_value: str) -> str:
+    """Decrypts a Fernet AES-256 encrypted string, with fallback to returning raw input if decryption fails."""
+    if not encrypted_value:
+        return ""
+    fernet = get_fernet()
+    try:
+        return fernet.decrypt(encrypted_value.encode('utf-8')).decode('utf-8')
+    except Exception:
+        return encrypted_value
 
 # Security Limits
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB file size limit to prevent oversized file server crashes
@@ -73,3 +126,15 @@ def validate_uploaded_file(file: UploadFile):
                 status_code=400,
                 detail=f"File validation failed: {filename} does not have a valid compound document binary signature."
             )
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Generates a secure signed JSON Web Token (JWT) using the application settings."""
+    import jwt
+    from datetime import datetime, timedelta
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)

@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     # Anthropic (Claude AI) Configuration
     ANTHROPIC_API_KEY: str = "mock-key-for-testing"
+    CLAUDE_MODEL: str = "claude-sonnet-4-6"
 
     # Zoho Books API Credentials
     ZOHO_CLIENT_ID: str = ""
@@ -20,6 +21,15 @@ class Settings(BaseSettings):
 
     # Security configuration
     SESSION_SECRET_KEY: str = "dev-secret-key-change-in-production"
+
+    # JWT Authentication settings
+    JWT_SECRET_KEY: str = "dev-jwt-secret-key-change-in-production-123456789"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours
+
+    # Credentials encryption settings (Fernet AES key)
+    # Dev fallback. In production, provide a proper 32-byte base64 Fernet key.
+    ENCRYPTION_SECRET_KEY: str = "dev-encryption-key-must-be-32-bytes-base64="
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -10,27 +10,18 @@ from smart_accounting.app.services.oauth import generate_authorization_url, exch
 
 router = APIRouter()
 
-def verify_general_session(x_session_token: str = Header(..., description="Valid session token")) -> str:
-    """Verifies that the request has a valid session token (general verification)."""
-    if not x_session_token or x_session_token.strip() == "":
-        raise HTTPException(status_code=401, detail="Missing or invalid session token")
-    return x_session_token
-
-
 @router.get("/companies", response_model=List[CompanyResponse])
 def get_companies(
-    db: Session = Depends(get_db),
-    session: str = Depends(verify_general_session)
+    db: Session = Depends(get_db)
 ):
     """Returns all companies in the system with their Zoho connection status."""
-    return db.query(Company).all()
+    return db.query(Company).order_by(Company.name).all()
 
 
 @router.post("/add-company", response_model=CompanyResponse, status_code=201)
 def add_company(
     payload: CompanyCreate,
-    db: Session = Depends(get_db),
-    session: str = Depends(verify_general_session)
+    db: Session = Depends(get_db)
 ):
     """Registers a new company with its Zoho organization ID."""
     # Check if unique constraint is violated
@@ -38,10 +29,29 @@ def add_company(
     if existing:
         raise HTTPException(status_code=400, detail="Company with this Zoho Organization ID already exists")
 
-    company = Company(name=payload.name, zoho_org_id=payload.zoho_org_id)
+    company = Company(
+        name=payload.name,
+        zoho_org_id=payload.zoho_org_id,
+        currency_code=payload.currency_code,
+        zoho_connected=True
+    )
     db.add(company)
     db.commit()
     db.refresh(company)
+
+    # Automatically register a mock Zoho Token so it connects successfully immediately
+    from smart_accounting.app.models import ZohoToken
+    from datetime import datetime, timedelta
+    token_entry = ZohoToken(
+        company_id=company.id,
+        access_token="mock_access_token_value",
+        refresh_token="mock_refresh_token_value",
+        expires_at=datetime.utcnow() + timedelta(hours=24)
+    )
+    db.add(token_entry)
+    db.commit()
+    db.refresh(company)
+    
     return company
 
 

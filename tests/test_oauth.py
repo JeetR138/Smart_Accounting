@@ -52,8 +52,9 @@ def test_exchange_code_and_get_valid_token(db_session):
     # Verify token is saved in DB
     token_entry = db_session.query(ZohoToken).filter(ZohoToken.company_id == company.id).first()
     assert token_entry is not None
-    assert token_entry.access_token == "mock_access_token_123"
-    assert token_entry.refresh_token == "mock_refresh_token_123"
+    from smart_accounting.app.services.security import decrypt_value
+    assert decrypt_value(token_entry.access_token) == "mock_access_token_123"
+    assert decrypt_value(token_entry.refresh_token) == "mock_refresh_token_123"
     
     # Fetch valid token (should return existing one without refresh)
     access_token = get_valid_access_token(db_session, company.id)
@@ -84,7 +85,8 @@ def test_get_valid_access_token_auto_refresh(db_session):
     
     # Verify token is updated in DB
     updated_token = db_session.query(ZohoToken).filter(ZohoToken.company_id == company.id).first()
-    assert updated_token.access_token == access_token
+    from smart_accounting.app.services.security import decrypt_value
+    assert decrypt_value(updated_token.access_token) == access_token
     assert updated_token.expires_at > datetime.utcnow() + timedelta(minutes=50)
 
 

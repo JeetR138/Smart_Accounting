@@ -307,3 +307,28 @@ def test_general_ledger_parser(temp_dir):
     assert rows[1]["type"] == "debit"
     assert "COGS" in rows[1]["description"]
 
+
+def test_currency_detection(temp_dir):
+    from smart_accounting.app.services.parser import detect_currency_from_file, parse_document
+    
+    # 1. Test detection from filename
+    assert detect_currency_from_file("statement_usd_2026.xlsx") == "USD"
+    assert detect_currency_from_file("aed_report.xlsx") == "AED"
+    assert detect_currency_from_file("eur.xlsx") == "EUR"
+    
+    # 2. Test detection from excel content mock
+    excel_path = os.path.join(temp_dir, "test_curr_detect_expenses.xlsx")
+    columns = ["Expense Date", "Merchant", "Category", "Amount", "Currency Code"]
+    data = [
+        ["2026-12-10", "Sales fee", "Hosting", "100.00", "EUR"],
+        ["2026-12-11", "Payout", "Hosting", "200.00", "EUR"]
+    ]
+    create_mock_excel(excel_path, columns, data, sheet_name="Expenses")
+    assert detect_currency_from_file(excel_path) == "EUR"
+    
+    # 3. Test parse_document stamping currency
+    rows = parse_document(excel_path, default_currency="AED")
+    assert len(rows) == 2
+    assert rows[0]["currency"] == "EUR"
+
+

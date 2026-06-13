@@ -1,3 +1,5 @@
+import os
+import sys
 import json
 import logging
 from typing import List, Dict, Any
@@ -13,7 +15,7 @@ You are an expert accounting AI assistant. Your task is to classify parsed finan
 
 Available Zoho Modules and Rules:
 1. "banktransactions"
-   - Match: WIO bank statement rows and Mashreq bank statement rows.
+   - Match: Bank statement rows (e.g., WIO, Mashreq, Standard Chartered, Emirates NBD, or any other bank statements).
    - Required zoho_fields:
      - "date": "YYYY-MM-DD"
      - "amount": float
@@ -63,6 +65,14 @@ You MUST respond with a valid JSON array of objects. Each object corresponds to 
 - "zoho_fields": object
 - "confidence": string ("high" | "low")
 - "flag_reason": string
+
+CRITICAL JSON FORMATTING RULES:
+1. The response must be a single, valid JSON array of objects.
+2. Absolutely no markdown blocks (like ```json), conversational intro, or outro text.
+3. Ensure all double quotes (") inside text values (such as descriptions or names) are properly escaped as \\" (e.g., "description": "ATM WITHDRAWAL \\"SELF-SWITCH\\"") so the JSON remains syntactically valid.
+4. Escape all backslashes (\\) inside text values as \\\\.
+5. Do not include any comments in the JSON.
+6. Return the complete list of classifications. Do not truncate the output.
 
 Few-Shot Examples:
 Input:
@@ -178,7 +188,7 @@ def mock_classification(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         dt = row.get("date", "")
         
         # Determine defaults based on filename
-        if "wio" in source or "mashreq" in source or "standard_chartered" in source or "ebrcpt" in source:
+        if "wio" in source or "mashreq" in source or "standard_chartered" in source or "ebrcpt" in source or "emirates_nbd" in source or "nbd" in source:
             module = "banktransactions"
             fields = {
                 "date": dt,
@@ -282,14 +292,26 @@ def mock_classification(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 conf = "low"
                 reason = "High petty cash expense value"
         else:
-            module = "expenses"
-            fields = {
-                "date": dt,
-                "amount": amt,
-                "description": row.get("description", "")
-            }
-            conf = "low"
-            reason = "Unknown statement origin type"
+            if t_type == "credit":
+                module = "banktransactions"
+                fields = {
+                    "date": dt,
+                    "amount": amt,
+                    "transaction_type": "deposit",
+                    "description": row.get("description", ""),
+                    "payment_mode": "other"
+                }
+                conf = "low"
+                reason = "Unknown statement origin type (defaulted credit to bank transaction)"
+            else:
+                module = "expenses"
+                fields = {
+                    "date": dt,
+                    "amount": amt,
+                    "description": row.get("description", "")
+                }
+                conf = "low"
+                reason = "Unknown statement origin type"
             
         results.append({
             "row_index": idx,
@@ -300,13 +322,16 @@ def mock_classification(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         })
     return results
 
-def classify_transactions(rows: List[Dict[str, Any]], batch_size: int = 50, use_mock: bool = False) -> List[Dict[str, Any]]:
+def classify_transactions(rows: List[Dict[str, Any]], batch_size: int = 50, use_mock: bool = None) -> List[Dict[str, Any]]:
     """
     Groups transaction rows into batches, calls the Claude API for classification, and handles errors.
     Returns classified rows matching the original ordering.
     """
     if not rows:
         return []
+        
+    if use_mock is None:
+        use_mock = os.getenv("TESTING") == "True" or "pytest" in sys.modules
         
     # Check if we should use mock classification (e.g. key is not set or mock requested)
     if use_mock or settings.ANTHROPIC_API_KEY == "mock-key-for-testing" or not settings.ANTHROPIC_API_KEY:
@@ -316,8 +341,8 @@ def classify_transactions(rows: List[Dict[str, Any]], batch_size: int = 50, use_
     results = [None] * len(rows)
     client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
     
-    # We will use the model specified in prompt, falling back to standard 3.5 Sonnet if unavailable
-    model_name = "claude-3-5-sonnet-20241022"  # standard fallback for claude-sonnet-4-20250514 in current SDKs
+    # We will use the model specified in prompt, falling back to configured Claude model
+    model_name = settings.CLAUDE_MODEL
     
     # Process in batches
     for start_idx in range(0, len(rows), batch_size):
@@ -332,15 +357,21 @@ def classify_transactions(rows: List[Dict[str, Any]], batch_size: int = 50, use_
             logger.info(f"Sending batch {start_idx // batch_size + 1} ({len(batch)} rows) to Claude...")
             response_text = _call_claude_api(client, model_name, payload_str)
             
-            # Clean response text just in case Claude adds markdown wraps
+            # Robust JSON extraction: extract the outermost JSON array block [ ... ]
             clean_response = response_text.strip()
-            if clean_response.startswith("```json"):
-                clean_response = clean_response[7:]
-            if clean_response.endswith("```"):
-                clean_response = clean_response[:-3]
-            clean_response = clean_response.strip()
+            start_idx_json = clean_response.find('[')
+            end_idx_json = clean_response.rfind(']')
+            if start_idx_json != -1 and end_idx_json != -1:
+                json_str = clean_response[start_idx_json:end_idx_json+1]
+            else:
+                json_str = clean_response
+                
+            # Clean up trailing commas from Claude's response (e.g. [1, 2, ]) to make json loads bulletproof
+            import re
+            json_str = re.sub(r',\s*\]', ']', json_str)
+            json_str = re.sub(r',\s*\}', '}', json_str)
             
-            parsed_response = json.loads(clean_response)
+            parsed_response = json.loads(json_str)
             
             if not isinstance(parsed_response, list):
                 raise ValueError("Claude response is not a JSON list")

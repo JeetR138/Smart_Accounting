@@ -11,24 +11,68 @@ class Company(Base):
     name = Column(String(255), nullable=False)
     zoho_org_id = Column(String(50), nullable=False, unique=True)
     zoho_connected = Column(Boolean, default=False)
+    currency_code = Column(String(3), nullable=False, default="AED")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     token = relationship("ZohoToken", back_populates="company", uselist=False, cascade="all, delete-orphan")
     logs = relationship("ProcessingLog", back_populates="company", cascade="all, delete-orphan")
+    users = relationship("User", back_populates="company", cascade="all, delete-orphan")
 
 
 class ZohoToken(Base):
     __tablename__ = "zoho_tokens"
 
     company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), primary_key=True)
-    access_token = Column(String(1024), nullable=False)
-    refresh_token = Column(String(512), nullable=False)
+    access_token = Column(String(2048), nullable=False)  # Increased length to store encrypted tokens
+    refresh_token = Column(String(2048), nullable=False)  # Increased length to store encrypted tokens
     expires_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
     company = relationship("Company", back_populates="token")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), nullable=False, unique=True, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    role = Column(String(50), default="operator")  # e.g., 'admin', 'operator'
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    company = relationship("Company", back_populates="users")
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+
+    id = Column(String(36), primary_key=True, index=True)  # UUID string
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String(50), nullable=False, default="pending")  # pending, processing, completed, failed
+    total_rows = Column(Integer, default=0)
+    processed_rows = Column(Integer, default=0)
+    error_message = Column(String(1024), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    company = relationship("Company")
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
+    action = Column(String(100), nullable=False)  # e.g., 'register', 'login', 'upload', 'approve', 'connect_zoho'
+    details = Column(JSON, nullable=True)
+    ip_address = Column(String(45), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class ProcessingLog(Base):
@@ -46,8 +90,11 @@ class ProcessingLog(Base):
     
     # Enrichment fields for manual review and debug
     flag_reason = Column(String(255), nullable=True)
-    zoho_fields = Column(JSON, nullable=True)  # Contains mapped API fields from Claude
-    raw_data = Column(JSON, nullable=True)     # Raw dictionary from parser
+    zoho_fields = Column(JSON, nullable=True)           # Mapped/corrected fields
+    original_zoho_fields = Column(JSON, nullable=True)  # AI-generated fields before edits
+    raw_data = Column(JSON, nullable=True)              # Raw dictionary from parser
+    approved_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    job_id = Column(String(36), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
 
     # Relationships
     company = relationship("Company", back_populates="logs")

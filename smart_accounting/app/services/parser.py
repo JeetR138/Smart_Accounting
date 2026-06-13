@@ -66,6 +66,95 @@ def normalize_amount(amount_val: Any) -> float:
     except ValueError:
         return 0.0
 
+VALID_CURRENCY_CODES = {
+    "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM", "BBD", "BDT", "BGN", "BHD", "BIF",
+    "BMD", "BND", "BOB", "BRL", "BSD", "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHF", "CLP", "CNY", "COP", "CRC",
+    "CUP", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP", "ERN", "ETB", "EUR", "FJD", "FKP", "GBP", "GEL", "GHS",
+    "GIP", "GMD", "GNF", "GTQ", "GYD", "HKD", "HNL", "HRK", "HTG", "HUF", "IDR", "ILS", "INR", "IQD", "IRR", "ISK",
+    "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF", "KPW", "KRW", "KWD", "KYD", "KZT", "LAK", "LBP", "LKR", "LRD",
+    "LSL", "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRU", "MUR", "MVR", "MWK", "MXN", "MYR", "MZN",
+    "NAD", "NGN", "NIO", "NOK", "NPR", "NZD", "OMR", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG", "QAR", "RON",
+    "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD", "SHP", "SLL", "SOS", "SRD", "SSP", "STN", "SVC",
+    "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "UGX", "USD", "UYU", "UZS",
+    "VES", "VND", "VUV", "WST", "XAF", "XCD", "XOF", "XPF", "YER", "ZAR", "ZMW", "ZWL"
+}
+
+def detect_currency_from_file(file_path: str, default_currency: str = "AED") -> str:
+    """
+    Attempts to auto-detect the currency of the financial statement file.
+    Checks filename keywords first, then searches the file's text content for currency codes and symbols.
+    """
+    filename_lower = os.path.basename(file_path).lower()
+    
+    # 1. Check filename for common currency codes
+    for ccy in ["usd", "aed", "eur", "gbp", "inr", "sar", "sgd", "cad", "aud"]:
+        if ccy in filename_lower:
+            return ccy.upper()
+            
+    # Extract text content
+    text_content = ""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".pdf":
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages[:3]: # Scan first 3 pages
+                    text_content += (page.extract_text() or "") + "\n"
+        except Exception:
+            pass
+    elif ext in [".xlsx", ".xls"]:
+        try:
+            df = pd.read_excel(file_path, nrows=100)
+            text_content = df.to_string()
+        except Exception:
+            pass
+            
+    if not text_content:
+        return default_currency
+        
+    text_lower = text_content.lower()
+    
+    # 2. Look for pattern "currency: XXX" or "currency code: XXX" or "ccy: XXX"
+    matches = re.findall(r"(?:currency|curr|ccy|valuta)\s*[:\-\s\.]+\s*([a-zA-Z]{3})", text_lower)
+    if matches:
+        for match in matches:
+            val = match.upper()
+            if val in VALID_CURRENCY_CODES:
+                return val
+
+    # 3. Check for specific symbols or unique words
+    if "₹" in text_content or "rs." in text_lower or "rupee" in text_lower or "inr" in text_lower:
+        return "INR"
+    if "€" in text_content or "euro" in text_lower or "eur" in text_lower:
+        return "EUR"
+    if "£" in text_content or "pound" in text_lower or "sterling" in text_lower or "gbp" in text_lower:
+        return "GBP"
+    if "dhs" in text_lower or "dirham" in text_lower or "aed" in text_lower:
+        return "AED"
+    if "us$" in text_lower or "dollar" in text_lower or "usd" in text_lower:
+        return "USD"
+    if "sar" in text_lower or "riyal" in text_lower:
+        return "SAR"
+    if "sgd" in text_lower:
+        return "SGD"
+    if "cad" in text_lower:
+        return "CAD"
+    if "aud" in text_lower:
+        return "AUD"
+
+    # 4. Fallback: Search for any valid 3-letter currency code in the text
+    # Prioritize finding uppercase matches because currency codes in files are usually capitalized (e.g. USD, EUR)
+    for code in VALID_CURRENCY_CODES:
+        if re.search(r"\b" + code + r"\b", text_content):
+            return code
+            
+    # Try lowercase word boundaries as a final resort
+    for code in VALID_CURRENCY_CODES:
+        if re.search(r"\b" + code.lower() + r"\b", text_lower):
+            return code
+            
+    return default_currency
+
+
 def detect_file_type(file_path: str) -> Tuple[str, str]:
     """
     Detects the transaction source and format.
@@ -685,37 +774,209 @@ class StandardCharteredPDFParser:
         return rows
 
 
-def parse_document(file_path: str) -> List[Dict[str, Any]]:
+AI_PARSER_SYSTEM_PROMPT = """
+You are a financial parsing assistant. Your task is to analyze raw text/CSV extracted from a financial document (bank statement, expense spreadsheet, payout report) and extract all transaction rows.
+
+For each transaction, you must extract:
+- "date": Date in "YYYY-MM-DD" format.
+- "description": Description of the transaction.
+- "amount": Absolute numeric amount as a float.
+- "type": "debit" (if money went out/payment/withdrawal/fee) or "credit" (if money came in/deposit/receipt/payout).
+
+CRITICAL JSON FORMATTING RULES:
+1. The response must be a single, valid JSON array of objects.
+2. Absolutely no markdown blocks (like ```json), conversational intro, or outro text.
+3. Ensure all double quotes (") inside text values (such as descriptions) are properly escaped as \\" (e.g., "description": "ATM WITHDRAWAL \\"SELF-SWITCH\\"") so the JSON remains syntactically valid.
+4. Escape all backslashes (\\) inside text values as \\\\.
+5. Do not include any comments in the JSON.
+6. Return the complete list of transactions. Do not truncate the output.
+
+Example response:
+[
+  {"date": "2026-06-10", "description": "AWS Cloud Hosting", "amount": 450.00, "type": "debit"},
+  {"date": "2026-06-11", "description": "Client payout NOMOD", "amount": 1470.00, "type": "credit"}
+]
+"""
+
+def parse_document_with_ai(file_path: str) -> List[Dict[str, Any]]:
+    """
+    Extracts text/CSV content from PDF/Excel, chunks it to handle arbitrary document size,
+    and calls Claude to parse each chunk. Merges and returns the results.
+    """
+    import json
+    from anthropic import Anthropic
+    from smart_accounting.app.config import settings
+
+    ext = os.path.splitext(file_path)[1].lower()
+    chunks = []
+    
+    if ext == ".pdf":
+        try:
+            pages_text = []
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages:
+                    text = (page.extract_text() or "").strip()
+                    if text:
+                        pages_text.append(text)
+            
+            # Group pages into chunks of 2 pages
+            page_group_size = 2
+            for i in range(0, len(pages_text), page_group_size):
+                chunk_text = "\n\n--- PAGE BREAK ---\n\n".join(pages_text[i : i + page_group_size])
+                chunks.append(chunk_text)
+        except Exception as e:
+            raise ParserError(f"Failed to extract text from PDF: {e}")
+            
+    elif ext in [".xlsx", ".xls"]:
+        try:
+            xls = pd.ExcelFile(file_path)
+            all_lines = []
+            header_line = ""
+            for sheet_name in xls.sheet_names:
+                df = pd.read_excel(xls, sheet_name=sheet_name)
+                csv_content = df.to_csv(index=False)
+                lines = [l.strip() for l in csv_content.splitlines() if l.strip()]
+                if lines:
+                    if not header_line:
+                        header_line = lines[0]
+                        all_lines.extend(lines[1:])
+                    else:
+                        all_lines.extend(lines[1:])
+            
+            # Chunk CSV lines (e.g. 80 lines per chunk)
+            csv_chunk_size = 80
+            for i in range(0, len(all_lines), csv_chunk_size):
+                chunk_lines = [header_line] + all_lines[i : i + csv_chunk_size]
+                chunks.append("\n".join(chunk_lines))
+        except Exception as e:
+            raise ParserError(f"Failed to extract CSV from Excel: {e}")
+    else:
+        raise UnsupportedFileError(f"Unsupported file type: {ext}")
+
+    # Process chunks if there are none (empty file)
+    if not chunks:
+        return []
+
+    # Support mock parser fallback for offline testing
+    if not settings.ANTHROPIC_API_KEY or settings.ANTHROPIC_API_KEY == "mock-key-for-testing":
+        source_file = os.path.basename(file_path)
+        return [{
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "description": f"Mock AI Parsed: Transaction from {source_file}",
+            "amount": 100.0,
+            "type": "debit",
+            "source_file": source_file
+        }]
+
+    client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    all_parsed_rows = []
+    source_file = os.path.basename(file_path)
+
+    for idx, chunk_content in enumerate(chunks):
+        if not chunk_content.strip():
+            continue
+            
+        try:
+            # Call Claude for this chunk
+            message = client.messages.create(
+                model=settings.CLAUDE_MODEL,
+                max_tokens=8000,
+                temperature=0.0,
+                system=AI_PARSER_SYSTEM_PROMPT,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"Extract all transactions from this document chunk (Chunk {idx+1}/{len(chunks)}):\n\n{chunk_content}"
+                    }
+                ]
+            )
+            response_text = message.content[0].text.strip()
+            
+            # Robust JSON extraction: extract the outermost JSON array block [ ... ]
+            start_idx = response_text.find('[')
+            end_idx = response_text.rfind(']')
+            if start_idx != -1 and end_idx != -1:
+                json_str = response_text[start_idx:end_idx+1]
+            else:
+                json_str = response_text
+                
+            # Clean up trailing commas
+            json_str = re.sub(r',\s*\]', ']', json_str)
+            json_str = re.sub(r',\s*\}', '}', json_str)
+            
+            chunk_rows = json.loads(json_str)
+            if isinstance(chunk_rows, list):
+                for row in chunk_rows:
+                    row["source_file"] = source_file
+                    row["date"] = normalize_date(row.get("date"))
+                    row["amount"] = normalize_amount(row.get("amount"))
+                    all_parsed_rows.append(row)
+            else:
+                print(f"Warning: Chunk {idx+1} did not return a JSON list, skipping.", flush=True)
+        except Exception as e:
+            raise ParserError(f"AI statement parsing failed on chunk {idx+1}/{len(chunks)}: {e}")
+
+    return all_parsed_rows
+
+
+def parse_document(file_path: str, default_currency: str = "AED") -> List[Dict[str, Any]]:
     """
     Main orchestration function to detect the file layout and run the appropriate parser.
+    If layout parser fails, falls back to AI-based document parsing.
     """
-    fmt, source = detect_file_type(file_path)
+    detected_currency = detect_currency_from_file(file_path, default_currency)
     
-    if fmt == "pdf":
-        if source == "wio":
-            return WioPDFParser().parse(file_path)
-        elif source == "mashreq":
-            return MashreqPDFParser().parse(file_path)
-        elif source == "standard_chartered":
-            return StandardCharteredPDFParser().parse(file_path)
-        else:
-            raise UnsupportedFileError(f"Unknown PDF format for file: {os.path.basename(file_path)}")
-            
-    elif fmt == "excel":
-        if source == "network_international":
-            return NetworkInternationalExcelParser().parse(file_path)
-        elif source == "nomod":
-            return NomodExcelParser().parse(file_path)
-        elif source == "purchases":
-            return PurchasesExcelParser().parse(file_path)
-        elif source == "expenses":
-            return ExpensesExcelParser().parse(file_path)
-        elif source == "petty_cash":
-            return PettyCashExcelParser().parse(file_path)
-        elif source == "general_ledger":
-            return GeneralLedgerExcelParser().parse(file_path)
-        else:
-            raise UnsupportedFileError(f"Unknown Excel column layout for file: {os.path.basename(file_path)}")
-            
-    else:
-        raise UnsupportedFileError(f"Unsupported format: {fmt} for file: {os.path.basename(file_path)}")
+    try:
+        fmt, source = detect_file_type(file_path)
+    except Exception as e:
+        print(f"File layout detection failed. Falling back to AI parser: {e}", flush=True)
+        rows = parse_document_with_ai(file_path)
+        for r in rows:
+            r["currency"] = detected_currency
+        return rows
+    
+    rows = []
+    try:
+        if fmt == "pdf":
+            if source == "wio":
+                rows = WioPDFParser().parse(file_path)
+            elif source == "mashreq":
+                rows = MashreqPDFParser().parse(file_path)
+            elif source == "standard_chartered":
+                rows = StandardCharteredPDFParser().parse(file_path)
+            else:
+                raise UnsupportedFileError(f"Unknown PDF format: {source}")
+        elif fmt == "excel":
+            if source == "network_international":
+                rows = NetworkInternationalExcelParser().parse(file_path)
+            elif source == "nomod":
+                rows = NomodExcelParser().parse(file_path)
+            elif source == "purchases":
+                rows = PurchasesExcelParser().parse(file_path)
+            elif source == "expenses":
+                rows = ExpensesExcelParser().parse(file_path)
+            elif source == "petty_cash":
+                rows = PettyCashExcelParser().parse(file_path)
+            elif source == "general_ledger":
+                rows = GeneralLedgerExcelParser().parse(file_path)
+            else:
+                raise UnsupportedFileError(f"Unknown Excel layout: {source}")
+    except Exception as pe:
+        print(f"Standard layout parser failed. Falling back to AI parser: {pe}", flush=True)
+        rows = parse_document_with_ai(file_path)
+        for r in rows:
+            r["currency"] = detected_currency
+        return rows
+
+    # Check if standard parser extracted nothing
+    if not rows:
+        print("Standard layout parser extracted 0 rows. Falling back to AI parser", flush=True)
+        rows = parse_document_with_ai(file_path)
+        for r in rows:
+            r["currency"] = detected_currency
+        return rows
+
+    for r in rows:
+        r["currency"] = detected_currency
+
+    return rows

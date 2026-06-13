@@ -2,7 +2,9 @@ import os
 import pandas as pd
 from datetime import datetime, timedelta
 from smart_accounting.app.database import engine, SessionLocal, Base
-from smart_accounting.app.models import Company, ZohoToken
+from smart_accounting.app.database import engine, SessionLocal, Base
+from smart_accounting.app.models import Company, ZohoToken, User
+from smart_accounting.app.services.security import hash_password
 
 def setup_demo():
     # 1. Initialize SQLite Database tables
@@ -39,6 +41,26 @@ def setup_demo():
             token.expires_at = datetime.utcnow() + timedelta(hours=1)
             db.commit()
             print("Refreshed mock Zoho token expiry.")
+
+        # Check if user exists
+        user = db.query(User).filter(User.email == "admin@example.com").first()
+        if not user:
+            print("Creating demo user: admin@example.com...")
+            user = User(
+                email="admin@example.com",
+                hashed_password=hash_password("password"),
+                role="admin",
+                company_id=company.id
+            )
+            db.add(user)
+            db.commit()
+            print("Demo user created successfully.")
+        else:
+            user.hashed_password = hash_password("password")
+            user.role = "admin"
+            user.company_id = company.id
+            db.commit()
+            print("Demo user updated/verified.")
             
         print(f"\nDemo Setup Complete!")
         print(f"Company ID: {company.id}")

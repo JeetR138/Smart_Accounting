@@ -5,6 +5,7 @@ from pydantic import BaseModel
 class CompanyBase(BaseModel):
     name: str
     zoho_org_id: str
+    currency_code: str = "AED"
 
 
 class CompanyCreate(CompanyBase):

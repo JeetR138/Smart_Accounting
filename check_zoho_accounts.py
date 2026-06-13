@@ -17,11 +17,9 @@ def check_accounts():
         print(f"Using access token: {token[:8]}...")
         print(f"Using org ID: {org_id}")
         
-        # 1. Fetch Chart of Accounts / Bank Accounts
-        url = f"{settings.ZOHO_BOOKS_URL}/v3/bankaccounts"
+        url = f"{settings.ZOHO_BOOKS_URL}/v3/bankaccounts?organization_id={org_id}"
         headers = {
-            "Authorization": f"Bearer {token}",
-            "X-com-zoho-books-organizationid": org_id
+            "Authorization": f"Bearer {token}"
         }
         
         res = httpx.get(url, headers=headers)

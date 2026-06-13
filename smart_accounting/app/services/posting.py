@@ -45,10 +45,9 @@ def _execute_zoho_post(access_token: str, zoho_org_id: str, zoho_module: str, fi
         logger.info(f"[Mock Zoho POST] Module: {zoho_module}, Fields: {fields}")
         return f"mock_zoho_{zoho_module}_{int(datetime.utcnow().timestamp())}"
 
-    url = f"{settings.ZOHO_BOOKS_URL}/v3/{zoho_module}"
+    url = f"{settings.ZOHO_BOOKS_URL}/v3/{zoho_module}?organization_id={zoho_org_id}"
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "X-com-zoho-books-organizationid": zoho_org_id,
         "Content-Type": "application/json;charset=UTF-8"
     }
 
@@ -90,7 +89,12 @@ def _execute_zoho_post(access_token: str, zoho_org_id: str, zoho_module: str, fi
         raise ZohoAPIError(f"Network error contacting Zoho: {e}")
 
 
-def get_or_create_zoho_bank_account(access_token: str, zoho_org_id: str, statement_source: str) -> str:
+def get_or_create_zoho_bank_account(
+    access_token: str,
+    zoho_org_id: str,
+    statement_source: str,
+    currency_code: str = None
+) -> str:
     """
     Fetches the bank account list from Zoho.
     If an account matching the statement source exists, returns its ID.
@@ -109,7 +113,28 @@ def get_or_create_zoho_bank_account(access_token: str, zoho_org_id: str, stateme
 
     # Support mock flow
     if not settings.ZOHO_CLIENT_ID or settings.ZOHO_CLIENT_ID == "your-zoho-client-id" or access_token.startswith("mock_"):
-        return f"mock_bank_account_id_{account_name.replace(' ', '_')}"
+        temp_ccy = currency_code or "AED"
+        mock_name = f"{account_name} ({temp_ccy})"
+        return f"mock_bank_account_id_{mock_name.replace(' ', '_')}"
+
+    # If currency_code is not passed, attempt to read from DB
+    if not currency_code:
+        currency_code = "AED"
+        try:
+            from smart_accounting.app.database import SessionLocal
+            from smart_accounting.app.models import Company
+            db = SessionLocal()
+            try:
+                company = db.query(Company).filter(Company.zoho_org_id == zoho_org_id).first()
+                if company and company.currency_code:
+                    currency_code = company.currency_code
+            finally:
+                db.close()
+        except Exception as db_err:
+            logger.error(f"Failed to fetch currency_code from DB: {db_err}")
+
+    # Append currency code to bank account name to keep distinct currency accounts in Zoho
+    account_name = f"{account_name} ({currency_code})"
 
     cache_key = (zoho_org_id, access_token, account_name)
     now = time.time()
@@ -118,10 +143,9 @@ def get_or_create_zoho_bank_account(access_token: str, zoho_org_id: str, stateme
         if now - ts < 300:  # 5 min cache
             return cached_id
 
-    list_url = f"{settings.ZOHO_BOOKS_URL}/v3/bankaccounts"
+    list_url = f"{settings.ZOHO_BOOKS_URL}/v3/bankaccounts?organization_id={zoho_org_id}"
     headers = {
-        "Authorization": f"Bearer {access_token}",
-        "X-com-zoho-books-organizationid": zoho_org_id
+        "Authorization": f"Bearer {access_token}"
     }
     
     try:
@@ -150,11 +174,11 @@ def get_or_create_zoho_bank_account(access_token: str, zoho_org_id: str, stateme
                 return acc_id
                         
         # Create the account if not found in list
-        create_url = f"{settings.ZOHO_BOOKS_URL}/v3/bankaccounts"
+        create_url = f"{settings.ZOHO_BOOKS_URL}/v3/bankaccounts?organization_id={zoho_org_id}"
         payload = {
             "account_name": account_name,
             "account_type": "bank",
-            "currency_code": "INR"
+            "currency_code": currency_code
         }
         create_res = httpx.post(create_url, json=payload, headers=headers)
         if create_res.status_code == 429:
@@ -209,10 +233,9 @@ def get_zoho_accounts(access_token: str, zoho_org_id: str) -> List[Dict[str, Any
             {"account_id": "mock_acc_bank_fees", "account_name": "Bank Fees and Charges", "account_type": "expense"}
         ]
 
-    url = f"{settings.ZOHO_BOOKS_URL}/v3/chartofaccounts"
+    url = f"{settings.ZOHO_BOOKS_URL}/v3/chartofaccounts?organization_id={zoho_org_id}"
     headers = {
-        "Authorization": f"Bearer {access_token}",
-        "X-com-zoho-books-organizationid": zoho_org_id
+        "Authorization": f"Bearer {access_token}"
     }
     try:
         res = httpx.get(url, headers=headers)
@@ -296,7 +319,15 @@ def infer_expense_category(description: str) -> str:
     return "Other Expenses"
 
 
-def post_row_to_zoho(db: Session, company_id: int, zoho_org_id: str, zoho_module: str, fields: Dict[str, Any], source_file: str = "") -> Tuple[str, str]:
+def post_row_to_zoho(
+    db: Session,
+    company_id: int,
+    zoho_org_id: str,
+    zoho_module: str,
+    fields: Dict[str, Any],
+    source_file: str = "",
+    currency_code: str = None
+) -> Tuple[str, str]:
     """
     Helper function that retrieves a valid token, normalizes payloads, and makes the post call.
     Returns (zoho_record_id, actual_zoho_module_posted).
@@ -306,7 +337,7 @@ def post_row_to_zoho(db: Session, company_id: int, zoho_org_id: str, zoho_module
     
     # Normalize fields for Bank Transactions API
     if zoho_module == "banktransactions":
-        bank_acc_id = get_or_create_zoho_bank_account(access_token, zoho_org_id, source_file)
+        bank_acc_id = get_or_create_zoho_bank_account(access_token, zoho_org_id, source_file, currency_code=currency_code)
         t_type = fields.get("transaction_type")
         
         if t_type == "withdrawal":
@@ -345,7 +376,7 @@ def post_row_to_zoho(db: Session, company_id: int, zoho_org_id: str, zoho_module
         
         # Resolve the paid through bank account ID
         paid_through = fields.get("paid_through_account", "")
-        bank_acc_id = get_or_create_zoho_bank_account(access_token, zoho_org_id, paid_through)
+        bank_acc_id = get_or_create_zoho_bank_account(access_token, zoho_org_id, paid_through, currency_code=currency_code)
         fields["paid_through_account_id"] = bank_acc_id
         
         # Clean up fields not accepted by Zoho /expenses endpoint
@@ -363,7 +394,9 @@ def post_transactions(
     company_id: int,
     zoho_org_id: str,
     parsed_rows: List[Dict[str, Any]],
-    classified_rows: List[Dict[str, Any]]
+    classified_rows: List[Dict[str, Any]],
+    job_id: str = None,
+    auto_clean: bool = False
 ) -> Dict[str, int]:
     """
     Orchestrates transaction posting:
@@ -371,6 +404,35 @@ def post_transactions(
     - Low confidence rows are flagged for manual review.
     - All outcomes are logged in `processing_log`.
     """
+    if auto_clean:
+        for c_row in classified_rows:
+            c_row["confidence"] = "high"
+            c_row["flag_reason"] = ""
+            fields = c_row.get("zoho_fields")
+            if fields is None:
+                fields = {}
+                c_row["zoho_fields"] = fields
+            
+            module = c_row.get("zoho_module", "expenses")
+            if module == "expenses":
+                if not fields.get("account_name"):
+                    fields["account_name"] = "Other Expenses"
+                if not fields.get("paid_through_account"):
+                    fields["paid_through_account"] = "WIO Bank"
+            elif module == "bills":
+                if not fields.get("supplier_name"):
+                    fields["supplier_name"] = "General Supplier"
+            elif module == "customerpayments":
+                if not fields.get("customer_name"):
+                    fields["customer_name"] = "General Customer"
+                if not fields.get("payment_mode"):
+                    fields["payment_mode"] = "online"
+            elif module == "banktransactions":
+                if not fields.get("transaction_type"):
+                    fields["transaction_type"] = "withdrawal"
+                if not fields.get("payment_mode"):
+                    fields["payment_mode"] = "bank_transfer"
+
     stats = {"total_rows": len(parsed_rows), "posted": 0, "flagged": 0, "failed": 0}
     abort_posting = False
     abort_reason = ""
@@ -383,6 +445,7 @@ def post_transactions(
         amount = p_row.get("amount", 0.0)
         source_file = p_row.get("source_file", "unknown")
 
+        import copy
         log_entry = ProcessingLog(
             company_id=company_id,
             source_file=source_file,
@@ -390,7 +453,9 @@ def post_transactions(
             zoho_module=zoho_module,
             amount=amount,
             raw_data=p_row,
-            zoho_fields=zoho_fields
+            zoho_fields=zoho_fields,
+            original_zoho_fields=copy.deepcopy(zoho_fields),  # Preserve original AI output for audit trail
+            job_id=job_id
         )
 
         if confidence == "low":
@@ -398,50 +463,61 @@ def post_transactions(
             log_entry.flag_reason = flag_reason or "Low confidence classification"
             db.add(log_entry)
             stats["flagged"] += 1
-            continue
-
-        if abort_posting:
+        elif abort_posting:
             log_entry.status = "failed"
             log_entry.flag_reason = f"Posting skipped: {abort_reason}"
             db.add(log_entry)
             stats["failed"] += 1
-            continue
-
-        # Post high confidence row
-        try:
-            zoho_record_id, actual_module = post_row_to_zoho(db, company_id, zoho_org_id, zoho_module, zoho_fields, source_file=source_file)
-            log_entry.status = "posted"
-            log_entry.zoho_module = actual_module
-            log_entry.zoho_record_id = zoho_record_id
-            log_entry.posted_at = datetime.utcnow()
-            stats["posted"] += 1
-        except Exception as e:
-            logger.error(f"Failed to post row {idx} to Zoho: {e}")
-            log_entry.status = "failed"
-            log_entry.flag_reason = f"Posting failed: {str(e)}"
-            stats["failed"] += 1
-            
-            err_msg_lower = str(e).lower()
-            # Daily limit or rate limit
-            is_rate_limit = "rate limit" in err_msg_lower or "rate_limit" in err_msg_lower or "maximum call rate limit" in err_msg_lower
-            # Authentication failure (expired credentials, invalid token, etc.)
-            is_auth_error = "invalid_client" in err_msg_lower or "invalid_token" in err_msg_lower or "code: 57" in err_msg_lower or "authentication failed" in err_msg_lower or "unauthorized" in err_msg_lower or "access_denied" in err_msg_lower
-            # Connection/network/timeout errors
-            is_network_error = "network error" in err_msg_lower or "connecterror" in err_msg_lower or "timeout" in err_msg_lower or "connection" in err_msg_lower
-            
-            if is_rate_limit:
-                abort_posting = True
-                abort_reason = "Zoho API daily rate limit exceeded"
-            elif is_auth_error:
-                abort_posting = True
-                abort_reason = "Zoho authentication failed or token expired"
-            elif is_network_error:
-                abort_posting = True
-                abort_reason = "Network connection to Zoho failed"
+        else:
+            # Post high confidence row
+            try:
+                currency_code = p_row.get("currency")
+                zoho_record_id, actual_module = post_row_to_zoho(
+                    db,
+                    company_id,
+                    zoho_org_id,
+                    zoho_module,
+                    zoho_fields,
+                    source_file=source_file,
+                    currency_code=currency_code
+                )
+                log_entry.status = "posted"
+                log_entry.zoho_module = actual_module
+                log_entry.zoho_record_id = zoho_record_id
+                log_entry.posted_at = datetime.utcnow()
+                stats["posted"] += 1
+            except Exception as e:
+                logger.error(f"Failed to post row {idx} to Zoho: {e}")
+                log_entry.status = "failed"
+                log_entry.flag_reason = f"Posting failed: {str(e)}"
+                stats["failed"] += 1
+                
+                err_msg_lower = str(e).lower()
+                # Daily limit or rate limit
+                is_rate_limit = "rate limit" in err_msg_lower or "rate_limit" in err_msg_lower or "maximum call rate limit" in err_msg_lower
+                # Authentication failure (expired credentials, invalid token, etc.)
+                is_auth_error = "invalid_client" in err_msg_lower or "invalid_token" in err_msg_lower or "code: 57" in err_msg_lower or "authentication failed" in err_msg_lower or "unauthorized" in err_msg_lower or "access_denied" in err_msg_lower
+                # Connection/network/timeout errors
+                is_network_error = "network error" in err_msg_lower or "connecterror" in err_msg_lower or "timeout" in err_msg_lower or "connection" in err_msg_lower
+                
+                if is_rate_limit:
+                    abort_posting = True
+                    abort_reason = "Zoho API daily rate limit exceeded"
+                elif is_auth_error:
+                    abort_posting = True
+                    abort_reason = "Zoho authentication failed or token expired"
+                elif is_network_error:
+                    abort_posting = True
+                    abort_reason = "Network connection to Zoho failed"
 
         db.add(log_entry)
+        db.commit()
 
-    db.commit()
+        if job_id:
+            from smart_accounting.app.models import Job
+            db.query(Job).filter(Job.id == job_id).update({"processed_rows": idx})
+            db.commit()
+
     return stats
 
 
@@ -481,8 +557,21 @@ def approve_flagged_entry(
         flag_modified(log_entry, "zoho_fields")
 
     try:
+        # Retrieve currency code from raw_data if available
+        currency_code = None
+        if log_entry.raw_data and isinstance(log_entry.raw_data, dict):
+            currency_code = log_entry.raw_data.get("currency")
+
         # Post to Zoho
-        zoho_record_id, actual_module = post_row_to_zoho(db, company_id, company.zoho_org_id, log_entry.zoho_module, fields, source_file=log_entry.source_file)
+        zoho_record_id, actual_module = post_row_to_zoho(
+            db,
+            company_id,
+            company.zoho_org_id,
+            log_entry.zoho_module,
+            fields,
+            source_file=log_entry.source_file,
+            currency_code=currency_code
+        )
         
         # Update log
         log_entry.status = "posted"
