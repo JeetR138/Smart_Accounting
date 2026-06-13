@@ -116,3 +116,45 @@ If `ANTHROPIC_API_KEY` or `ZOHO_CLIENT_ID` is unset or set to mock defaults:
 * The classification service runs in **Mock Classification mode**, returning deterministic mappings.
 * The Zoho Books poster runs in **Mock Posting mode**, logging successful transactions to the DB with mock Zoho record IDs.
 * This allows full development, manual interface verification, and automated testing to proceed offline without burning API limits or token credentials.
+
+---
+
+## Integration Guide: Inserting into an Existing CRM
+
+This module is designed as an isolated backend system, making it easy to embed into an existing CRM. There are two primary integration patterns:
+
+### Option A: Standalone Microservice (Recommended)
+Run this application as a separate microservice and connect to it from your CRM via HTTP/REST.
+
+1. **Deploy the Microservice**: Deploy the Docker container or run the FastAPI app on your servers.
+2. **CRM Backend calls**: Configure your CRM backend to make HTTP calls to this service.
+   * **Authentication**: Authenticate calls by setting the header:
+     `X-Session-Token: session_<company_id>`
+   * **Company Sync**: When a tenant registers in your CRM, create a corresponding company row in this service by calling `POST /api/v1/companies/`.
+3. **Embed CRM Frontend**:
+   * Add a file upload widget in your CRM's UI that uploads statement files to `POST /api/v1/upload?sync=false&auto_clean=false`.
+   * Embed a "Flagged Transactions" review page in the CRM dashboard that fetches unapproved items from `GET /api/v1/companies/<company_id>/flagged` and calls `POST /api/v1/companies/<company_id>/approve/<entry_id>` on user approval.
+   * Integrate the OAuth setup by linking the user to `GET /api/v1/companies/connect-zoho` to authorize their Zoho Books account.
+
+---
+
+### Option B: Code-Level Merge (Monolith)
+If your existing CRM is written in Python (FastAPI, Starlette, or Django), you can merge the codebases.
+
+1. **Copy Source Code**: Copy the `smart_accounting/` package directory directly into your CRM project root.
+2. **Register the Router**:
+   In your CRM's main FastAPI initialization (e.g., `main.py`), import and mount the smart accounting router:
+   ```python
+   from smart_accounting.app.api.router import api_router as smart_accounting_router
+   app.include_router(smart_accounting_router, prefix="/api/v1")
+   ```
+3. **Merge Database Models**:
+   * Add the SQLAlchemy models in `smart_accounting/app/models.py` to your CRM's database models registry.
+   * Generate a database migration using your CRM's migration tool (e.g., `alembic revision --autogenerate` or `python manage.py makemigrations`) to create the required tables:
+     * `companies`: Stores company settings and Zoho organization ID.
+     * `zoho_tokens`: Stores encrypted Zoho Books OAuth tokens.
+     * `jobs`: Tracks parsing progress.
+     * `processing_log`: Logs transaction rows and Zoho post outcomes.
+4. **Merge Settings**: Add the environment variables from `.env.example` into your CRM's configuration manager (e.g., Pydantic Settings, Django settings).
+5. **Adjust Session Dependency**:
+   Update `smart_accounting/app/api/deps.py` to use your existing CRM session/auth token resolver so that standard CRM users automatically pass the verification check.
